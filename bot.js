@@ -36,50 +36,6 @@ async function sendToSheet(payload) {
   );
 }
 
-function extractText(messageContent) {
-  if (!messageContent) return '';
-  return messageContent.conversation || messageContent.extendedTextMessage?.text || '';
-}
-
-/**
- * Diproses baik untuk pesan baru maupun pesan hasil edit.
- * `reportId` (dibentuk dari jid + ID pesan WA asli) dipakai Apps Script
- * untuk menentukan apakah harus menambah baris baru atau menimpa baris lama.
- */
-async function handleReportText({ sock, jid, msgKey, text, isEdit }) {
-  const outlet = GROUP_OUTLET_MAP[jid];
-  const reportId = `${jid}::${msgKey.id}`;
-
-  try {
-    const parsed = parseReport(text, outlet);
-
-    await sendToSheet({
-      reportId,
-      outlet: parsed.outlet,
-      tanggalText: parsed.tanggalText,
-      products: parsed.products,
-      pengeluaranItems: parsed.pengeluaranItems,
-      totalPengeluaran: parsed.totalPengeluaran,
-      raw: parsed.raw,
-    });
-
-    const warningText = parsed.warnings.length
-      ? `\n\n⚠️ Catatan:\n- ${parsed.warnings.join('\n- ')}`
-      : '';
-
-    const statusText = isEdit
-      ? `🔄 Laporan *${outlet}* berhasil *diperbarui* di Google Sheet (mengikuti pesan yang diedit).`
-      : `✅ Laporan *${outlet}* berhasil dicatat ke Google Sheet.`;
-
-    await sock.sendMessage(jid, { text: `${statusText}${warningText}` });
-  } catch (err) {
-    console.error('Gagal memproses laporan:', err.message);
-    await sock.sendMessage(jid, {
-      text: `❌ Gagal ${isEdit ? 'memperbarui' : 'mencatat'} laporan *${outlet}*. Cek format pesan lalu kirim ulang.\n(${err.message})`,
-    });
-  }
-}
-
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_session');
   const { version } = await fetchLatestBaileysVersion();
@@ -145,7 +101,6 @@ async function startBot() {
     }
   });
 
-  // Pesan BARU
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -160,30 +115,40 @@ async function startBot() {
         continue;
       }
 
-      const text = extractText(msg.message);
+      const text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        '';
+
       if (!/^report\b/i.test(text.trim())) continue; // abaikan chat biasa
 
-      await handleReportText({ sock, jid, msgKey: msg.key, text, isEdit: false });
-    }
-  });
+      const outlet = GROUP_OUTLET_MAP[jid];
 
-  // Pesan yang DI-EDIT (tekan lama pesan > Edit di WhatsApp)
-  sock.ev.on('messages.update', async (updates) => {
-    for (const { key, update } of updates) {
-      const jid = key?.remoteJid;
-      if (!jid || !jid.endsWith('@g.us')) continue;
-      if (!GROUP_OUTLET_MAP[jid]) continue;
+      try {
+        const parsed = parseReport(text, outlet);
 
-      // Tergantung versi Baileys, konten pesan hasil edit bisa muncul langsung
-      // di update.message, atau dibungkus di update.message.editedMessage.message
-      const editedContent = update?.message?.editedMessage?.message || update?.message || null;
-      if (!editedContent) continue;
+        await sendToSheet({
+          outlet: parsed.outlet,
+          tanggalText: parsed.tanggalText,
+          products: parsed.products,
+          pengeluaranItems: parsed.pengeluaranItems,
+          totalPengeluaran: parsed.totalPengeluaran,
+          raw: parsed.raw,
+        });
 
-      const text = extractText(editedContent);
-      if (!text || !/^report\b/i.test(text.trim())) continue;
+        const warningText = parsed.warnings.length
+          ? `\n\n⚠️ Catatan:\n- ${parsed.warnings.join('\n- ')}`
+          : '';
 
-      console.log(`✏️  Terdeteksi edit pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
-      await handleReportText({ sock, jid, msgKey: key, text, isEdit: true });
+        await sock.sendMessage(jid, {
+          text: `✅ Laporan *${outlet}* berhasil dicatat ke Google Sheet.${warningText}`,
+        });
+      } catch (err) {
+        console.error('Gagal memproses laporan:', err.message);
+        await sock.sendMessage(jid, {
+          text: `❌ Gagal mencatat laporan *${outlet}*. Cek format pesan lalu kirim ulang.\n(${err.message})`,
+        });
+      }
     }
   });
 }
