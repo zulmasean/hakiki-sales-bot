@@ -13,10 +13,6 @@ const { parseReport } = require('./parser');
 
 // ============================================================
 // 1) ISI MAPPING GRUP -> OUTLET DI SINI
-//    Cara dapatkan ID grup: jalankan bot ini sekali (npm start),
-//    kirim pesan apa saja di tiap grup, lalu cek log console.
-//    Bot akan mencetak: "ℹ️ Pesan dari grup belum terdaftar: 12036...@g.us"
-//    Salin ID tersebut ke bawah ini.
 // ============================================================
 const GROUP_OUTLET_MAP = {
   '120363427888047377@g.us': 'Catalina',
@@ -36,34 +32,34 @@ async function sendToSheet(payload) {
   );
 }
 
+/**
+ * Fungsi Extract Text yang diperkuat.
+ * Mencari isi teks sampai ke dalam struktur terdalam Baileys saat pesan diedit.
+ */
 function extractText(messageContent) {
   if (!messageContent) return '';
 
-  // 1. Ambil teks dari pesan normal
-  if (messageContent.conversation) return messageContent.conversation;
-  if (messageContent.extendedTextMessage?.text) return messageContent.extendedTextMessage.text;
+  // 1. Pesan normal
+  let text = messageContent.conversation || messageContent.extendedTextMessage?.text || '';
+  if (text) return text;
 
-  // 2. Ambil teks dari pesan yang di-edit (Baileys membungkusnya di protocolMessage)
-  const editedMessage = messageContent.protocolMessage?.editedMessage;
-  if (editedMessage) {
-    return editedMessage.conversation || editedMessage.extendedTextMessage?.text || '';
+  // 2. Pesan Edit (Baileys mengirimkannya lewat messages.upsert sebagai protocolMessage)
+  const editMsg = messageContent.protocolMessage?.editedMessage;
+  if (editMsg) {
+    text = editMsg.conversation || editMsg.extendedTextMessage?.text || '';
+    if (text) return text;
+  }
+
+  // 3. Pesan Edit (dari event messages.update)
+  const updateMsg = messageContent.editedMessage?.message;
+  if (updateMsg) {
+    text = updateMsg.conversation || updateMsg.extendedTextMessage?.text || '';
+    if (text) return text;
   }
 
   return '';
 }
 
-/**
- * ID pencocokan laporan sekarang dibuat dari OUTLET + TANGGAL yang tertulis
- * di pesan itu sendiri - BUKAN dari ID pesan WhatsApp.
- *
- * Alasannya: pesan hasil "Edit" di WhatsApp ternyata tidak selalu terkirim
- * lewat event edit resmi (messages.update) - kadang malah lewat jalur pesan
- * biasa (messages.upsert) dengan ID pesan yang baru/berbeda. Kalau
- * pencocokan berdasarkan ID pesan, ini bikin tiap "edit" dianggap laporan
- * baru yang terpisah. Dengan outlet+tanggal sebagai kunci, laporan akan
- * tetap ketemu & ditimpa dengan benar berapa pun kali diedit/dikirim ulang,
- * selama outlet dan tanggalnya ditulis sama persis.
- */
 function buildReportId(jid, outlet, tanggalText) {
   const normalizedOutlet = (outlet || '').toLowerCase().trim();
   const normalizedTanggal = (tanggalText || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -169,7 +165,7 @@ async function startBot() {
     }
   });
 
-  // Pesan BARU (juga menangkap kasus "edit" yang ternyata lewat jalur ini)
+  // JALUR 1: Event `upsert` (Menangkap pesan baru DAN pesan yang diedit tipe ProtocolMessage)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -177,21 +173,23 @@ async function startBot() {
       if (!msg.message || msg.key.fromMe) continue;
 
       const jid = msg.key.remoteJid;
-      if (!jid || !jid.endsWith('@g.us')) continue; // hanya proses grup
-
-      if (!GROUP_OUTLET_MAP[jid]) {
-        console.log('ℹ️  Pesan dari grup belum terdaftar:', jid);
-        continue;
-      }
+      if (!jid || !jid.endsWith('@g.us')) continue;
+      if (!GROUP_OUTLET_MAP[jid]) continue;
 
       const text = extractText(msg.message);
-      if (!/^report\b/i.test(text.trim())) continue; // abaikan chat biasa
+      if (!text || !/^report\b/i.test(text.trim())) continue;
+
+      if (msg.message.protocolMessage) {
+        console.log(`✏️ [UPSERT] Terdeteksi EDIT pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
+      } else {
+        console.log(`📩 [UPSERT] Terdeteksi pesan BARU di grup ${GROUP_OUTLET_MAP[jid]}`);
+      }
 
       await handleReportText({ sock, jid, text });
     }
   });
 
-  // Pesan yang DI-EDIT lewat event resmi (kalau versi Baileys/WA mendukungnya)
+  // JALUR 2: Event `update` (Fallback jika WA client melempar edit ke jalur ini)
   sock.ev.on('messages.update', async (updates) => {
     for (const item of updates) {
       const { key, update } = item;
@@ -200,22 +198,15 @@ async function startBot() {
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
 
-      // Pastikan ada payload update pesannya
-      if (!update || !update.message) continue;
-
-      // Ekstrak teks menggunakan fungsi baru (mengambil isi pesan yang sudah diedit)
-      let text = extractText(update.message);
-      
-      // Fallback: Jika struktur Baileys menggunakan bentuk lain
-      if (!text && update.message.editedMessage?.message) {
-        text = extractText(update.message.editedMessage.message);
+      if (update && update.message) {
+        const text = extractText(update.message);
+        if (text && /^report\b/i.test(text.trim())) {
+          console.log(`✏️ [UPDATE] Terdeteksi EDIT pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
+          await handleReportText({ sock, jid, text });
+        }
       }
-
-      if (!text || !/^report\b/i.test(text.trim())) continue;
-
-      console.log(`✏️ Terdeteksi edit pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
-      await handleReportText({ sock, jid, text });
     }
   });
+}
 
 startBot();
