@@ -44,7 +44,7 @@ async function handleReportText({ sock, jid, text }) {
     const parsed = parseReport(text, outlet);
     const reportId = buildReportId(jid, parsed.outlet, parsed.tanggalText);
 
-    console.log(`[DEBUG] Memproses laporan - reportId: ${reportId}`);
+    console.log(`\n[DEBUG] Memproses laporan - reportId: ${reportId}`);
     console.log(`[DEBUG] totalPengeluaran hasil parsing: ${parsed.totalPengeluaran}`);
     
     const response = await sendToSheet({
@@ -59,9 +59,11 @@ async function handleReportText({ sock, jid, text }) {
 
     const wasUpdate = response?.data?.wasUpdate;
     const warningText = parsed.warnings.length ? `\n\n⚠️ Catatan:\n- ${parsed.warnings.join('\n- ')}` : '';
+    
+    // Status balasan dibedakan: Apakah bot merekam baru atau melakukan UPDATE
     const statusText = wasUpdate
-      ? `🔄 Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *diperbarui* di Google Sheet.`
-      : `✅ Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil dicatat ke Google Sheet.`;
+      ? `🔄 Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *DIPERBARUI (REVISI)* di Google Sheet.`
+      : `✅ Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *DICATAT* ke Google Sheet.`;
 
     await sock.sendMessage(jid, { text: `${statusText}${warningText}` });
   } catch (err) {
@@ -106,9 +108,7 @@ async function startBot() {
     }
   });
 
-  // =======================================================
-  // PENCEGAT PAYLOAD MENTAH (Bypass semua kelemahan Baileys)
-  // =======================================================
+  // MENANGKAP PESAN BARU SAJA
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
@@ -116,31 +116,13 @@ async function startBot() {
       const jid = msg.key.remoteJid;
       if (!jid || !GROUP_OUTLET_MAP[jid]) continue;
 
-      let text = '';
-      let isEdit = false;
+      // Ambil teks dari pesan normal
+      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
-      // 1. CARA PALING AMPUH MENANGKAP EDIT:
-      // WhatsApp selalu menyelipkan data edit di 'protocolMessage.editedMessage'
-      const protocolMsg = msg.message.protocolMessage;
-      if (protocolMsg && protocolMsg.editedMessage) {
-        text = protocolMsg.editedMessage.conversation || protocolMsg.editedMessage.extendedTextMessage?.text || '';
-        isEdit = true;
-      } 
-      // 2. TANGKAP PESAN BARU BIASA:
-      else {
-        text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-      }
-
-      // Abaikan jika bukan format report
+      // Abaikan jika tidak diawali kata "report"
       if (!text || !/^report\b/i.test(text.trim())) continue;
 
-      if (isEdit) {
-        console.log(`\n✏️ [PESAN DIEDIT] Terdeteksi langsung dari payload di grup ${GROUP_OUTLET_MAP[jid]}`);
-      } else {
-        console.log(`\n📩 [PESAN BARU] Terdeteksi di grup ${GROUP_OUTLET_MAP[jid]}`);
-      }
-
-      // Kirim data yang sudah di-ekstrak ke Sheet
+      console.log(`\n📩 [PESAN MASUK] Terdeteksi dari grup ${GROUP_OUTLET_MAP[jid]}`);
       await handleReportText({ sock, jid, text });
     }
   });
