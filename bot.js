@@ -4,8 +4,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeInMemoryStore // <-- FITUR MEMORI DITAMBAHKAN
-} = require('@whiskeysockets/baileys');
+} = require('@whiskeysockets/baileys'); // makeInMemoryStore dihapus karena menyebabkan error
 const P = require('pino');
 const axios = require('axios');
 const qrcode = require('qrcode-terminal');
@@ -25,12 +24,10 @@ const GROUP_OUTLET_MAP = {
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 const SHARED_SECRET = process.env.SHARED_SECRET;
 
-// Inisialisasi Store (WAJIB ADA UNTUK BISA MEMBACA PESAN EDIT)
-const store = makeInMemoryStore({ logger: P({ level: 'silent' }) });
-store.readFromFile('./baileys_store.json');
-setInterval(() => {
-  store.writeToFile('./baileys_store.json');
-}, 10_000);
+// ============================================================
+// 2) MEMORI BUATAN SENDIRI (Super Ringan & Anti Error)
+// ============================================================
+const messageCache = new Map();
 
 async function sendToSheet(payload) {
   return axios.post(
@@ -110,18 +107,12 @@ async function startBot() {
     version,
     auth: state,
     logger: P({ level: 'silent' }),
-    // GET MESSAGE WAJIB DIISI AGAR BOT BISA MENDETEKSI EVENT "EDIT"
+    // BOT MENGAMBIL PESAN ASLI DARI CACHE BUATAN KITA SAAT ADA EDITAN
     getMessage: async (key) => {
-      if (store) {
-        const msg = await store.loadMessage(key.remoteJid, key.id);
-        return msg?.message || undefined;
-      }
-      return { conversation: '' };
+      return messageCache.get(key.id) || { conversation: '' };
     }
   });
 
-  // Sambungkan Store (Memori) ke Bot
-  store.bind(sock.ev);
   sock.ev.on('creds.update', saveCreds);
 
   if (usePairingCode && !sock.authState.creds.registered) {
@@ -148,14 +139,25 @@ async function startBot() {
     }
   });
 
-  // JALUR 1: MENANGKAP PESAN BARU
+  // JALUR 1: MENANGKAP PESAN BARU & MENYIMPAN KE MEMORI KITA
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
+      
       const jid = msg.key.remoteJid;
       if (!jid || !GROUP_OUTLET_MAP[jid]) continue;
 
-      // Filter pesan edit, biarkan ditangani oleh events messages.update
+      // SIMPAN PESAN KE CACHE
+      if (msg.key && msg.key.id) {
+        messageCache.set(msg.key.id, msg.message);
+        // Hapus data terlama agar memori server/VPS Anda tidak penuh
+        if (messageCache.size > 500) {
+          const firstKey = messageCache.keys().next().value;
+          messageCache.delete(firstKey);
+        }
+      }
+
+      // Filter pesan edit agar ditangani oleh messages.update di bawah
       if (msg.message.protocolMessage && (msg.message.protocolMessage.type === 14 || msg.message.protocolMessage.type === 'MESSAGE_EDIT')) {
         continue;
       }
@@ -168,7 +170,7 @@ async function startBot() {
     }
   });
 
-  // JALUR 2: MENANGKAP PESAN YANG DIEDIT (BERHASIL BERKAT "STORE" MEMORI)
+  // JALUR 2: MENANGKAP PESAN YANG DIEDIT 
   sock.ev.on('messages.update', async (updates) => {
     for (const item of updates) {
       const { key, update } = item;
@@ -177,7 +179,9 @@ async function startBot() {
       if (!jid || !GROUP_OUTLET_MAP[jid]) continue;
 
       if (update && update.message) {
+        // Teks editan secara otomatis akan didapatkan karena 'getMessage' di atas mengambilnya dari Cache kita
         const text = extractText(update.message);
+        
         if (text && /^report\b/i.test(text.trim())) {
           console.log(`\n✏️ [PESAN DIEDIT] Terdeteksi di grup ${GROUP_OUTLET_MAP[jid]}`);
           await handleReportText({ sock, jid, text });
