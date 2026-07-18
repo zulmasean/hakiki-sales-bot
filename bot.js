@@ -33,26 +33,31 @@ async function sendToSheet(payload) {
 }
 
 /**
- * Fungsi Extract Text Super Agresif
- * Menggali teks dari semua variasi struktur JSON Baileys saat edit terjadi
+ * Fungsi Extract Text Ultra-Wide
+ * Mencari teks dari segala kemungkinan struktur JSON WhatsApp Baileys
  */
 function extractText(msg) {
   if (!msg) return '';
 
-  // 1. Jalur edit di messages.update terbaru
-  const updateEdit = msg.editedMessage?.message?.protocolMessage?.editedMessage;
-  if (updateEdit) {
-    return updateEdit.conversation || updateEdit.extendedTextMessage?.text || '';
+  // 1. Pesan Normal
+  const normalText = msg.conversation || msg.extendedTextMessage?.text;
+  if (normalText) return normalText;
+
+  // 2. Pesan Edit (jalur utama Baileys)
+  const editMsg = msg.protocolMessage?.editedMessage;
+  if (editMsg) {
+    const editText = editMsg.conversation || editMsg.extendedTextMessage?.text;
+    if (editText) return editText;
   }
 
-  // 2. Jalur edit di messages.upsert
-  const protocolEdit = msg.protocolMessage?.editedMessage;
-  if (protocolEdit) {
-    return protocolEdit.conversation || protocolEdit.extendedTextMessage?.text || '';
+  // 3. Kemungkinan struktur langka lainnya
+  const innerMsg = msg.editedMessage?.message?.protocolMessage?.editedMessage || msg.editedMessage?.message;
+  if (innerMsg) {
+    const innerText = innerMsg.conversation || innerMsg.extendedTextMessage?.text;
+    if (innerText) return innerText;
   }
 
-  // 3. Pesan normal
-  return msg.conversation || msg.extendedTextMessage?.text || '';
+  return '';
 }
 
 function buildReportId(jid, outlet, tanggalText) {
@@ -68,7 +73,7 @@ async function handleReportText({ sock, jid, text }) {
     const parsed = parseReport(text, outlet);
     const reportId = buildReportId(jid, parsed.outlet, parsed.tanggalText);
 
-    console.log(`\n[DEBUG] Memproses laporan - reportId: ${reportId}`);
+    console.log(`[DEBUG] Memproses laporan - reportId: ${reportId}`);
     console.log(`[DEBUG] totalPengeluaran hasil parsing: ${parsed.totalPengeluaran}`);
     console.log(`[DEBUG] jumlah item pengeluaran: ${parsed.pengeluaranItems.length}`);
 
@@ -137,9 +142,7 @@ async function startBot() {
     if (qr && !usePairingCode) {
       console.log('\n📱 Scan QR code ini pakai WA di HP nomor bot (Perangkat Tertaut > Tautkan Perangkat):\n');
       qrcode.generate(qr, { small: true });
-      try {
-        await QRCode.toFile('./qr.png', qr, { width: 400 });
-      } catch (err) {}
+      try { await QRCode.toFile('./qr.png', qr, { width: 400 }); } catch (err) {}
     }
 
     if (connection === 'close') {
@@ -147,18 +150,15 @@ async function startBot() {
       console.log('Koneksi terputus. Reconnect:', shouldReconnect);
       if (shouldReconnect) startBot();
     } else if (connection === 'open') {
-      console.log('✅ Bot WhatsApp tersambung dan siap menerima laporan.');
+      console.log('✅ Bot WhatsApp tersambung dan siap menerima laporan.\n');
     }
   });
 
   // =======================================================
-  // PENANGANAN PESAN & EDIT (DIPERKUAT)
+  // EVENT LISTENER DIPERKUAT (DEBUG DI DEPAN)
   // =======================================================
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // KITA HAPUS: if (type !== 'notify') return;
-    // Agar event edit yang masuk saat reconnect/append tetap tertangkap
-
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
 
@@ -166,24 +166,35 @@ async function startBot() {
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
 
-      // Pancingan Log Debug: Jika pesan ini berjenis Edit (tipe 14), kita print bentuk mentahnya
-      if (msg.message.protocolMessage && (msg.message.protocolMessage.type === 14 || msg.message.protocolMessage.type === 'MESSAGE_EDIT')) {
-        console.log('\n[DEBUG RAW UPSERT EDIT DETECTED]', JSON.stringify(msg.message, null, 2));
+      // CEK APAKAH INI PESAN EDIT (Tipe 14 atau MESSAGE_EDIT)
+      const isEdit = msg.message.protocolMessage && 
+                    (msg.message.protocolMessage.type === 14 || msg.message.protocolMessage.type === 'MESSAGE_EDIT');
+
+      if (isEdit) {
+        console.log(`\n=== 🚨 [DEBUG RAW] PESAN EDIT MASUK DI GRUP ${GROUP_OUTLET_MAP[jid]} ===`);
+        console.log(JSON.stringify(msg.message, null, 2));
       }
 
+      // Ekstrak teks
       const text = extractText(msg.message);
-      if (!text || !/^report\b/i.test(text.trim())) continue;
 
-      if (msg.message.protocolMessage) {
-        console.log(`✏️ [UPSERT] Terdeteksi EDIT pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
+      // Filter teks
+      if (!text || !/^report\b/i.test(text.trim())) {
+        if (isEdit) console.log(`⚠️ Pesan edit diabaikan (Gagal ekstrak teks ATAU teks tidak diawali kata 'Report').`);
+        continue;
+      }
+
+      if (isEdit) {
+        console.log(`✅ Teks edit berhasil diekstrak! Memproses data ke Sheet...`);
       } else {
-        console.log(`📩 [UPSERT] Terdeteksi pesan BARU di grup ${GROUP_OUTLET_MAP[jid]}`);
+        console.log(`\n📩 [UPSERT] Terdeteksi pesan BARU di grup ${GROUP_OUTLET_MAP[jid]}`);
       }
 
       await handleReportText({ sock, jid, text });
     }
   });
 
+  // Tangkapan cadangan jika WA mengirimkan edit lewat jalur update
   sock.ev.on('messages.update', async (updates) => {
     for (const item of updates) {
       const { key, update } = item;
@@ -192,16 +203,18 @@ async function startBot() {
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
 
-      // Pancingan Log Debug: Jika ada unsur "editedMessage" di dalam update
-      if (JSON.stringify(update).includes('editedMessage')) {
-        console.log('\n[DEBUG RAW UPDATE EDIT DETECTED]', JSON.stringify(update, null, 2));
-      }
+      if (update && (update.editedMessage || update.message)) {
+        console.log(`\n=== 🚨 [DEBUG RAW UPDATE] PESAN UPDATE MASUK DI GRUP ${GROUP_OUTLET_MAP[jid]} ===`);
+        console.log(JSON.stringify(update, null, 2));
 
-      if (update && update.message) {
-        const text = extractText(update.message);
+        const actualMessage = update.editedMessage?.message || update.message;
+        const text = extractText(actualMessage);
+
         if (text && /^report\b/i.test(text.trim())) {
-          console.log(`✏️ [UPDATE] Terdeteksi EDIT pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
+          console.log(`✅ Teks update berhasil diekstrak! Memproses data ke Sheet...`);
           await handleReportText({ sock, jid, text });
+        } else {
+          console.log(`⚠️ Event update diabaikan (Bukan laporan penjualan).`);
         }
       }
     }
