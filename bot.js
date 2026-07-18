@@ -44,7 +44,7 @@ async function handleReportText({ sock, jid, text }) {
     const parsed = parseReport(text, outlet);
     
     // =========================================================
-    // TEMBOK PERTAHANAN KETAT
+    // TEMBOK PERTAHANAN: TOLAK JIKA ADA TYPO / BUKAN ANGKA
     // =========================================================
     if (parsed.criticalErrors && parsed.criticalErrors.length > 0) {
       console.log(`\n[DEBUG] Laporan dari ${outlet} DITOLAK karena salah format/typo.`);
@@ -52,11 +52,10 @@ async function handleReportText({ sock, jid, text }) {
       const errorMsg = `❌ *LAPORAN DITOLAK (Ada Kesalahan Format/Typo)* ❌\n\nSistem menemukan kesalahan pada tulisan Anda. Laporan *TIDAK DISIMPAN* ke Google Sheet.\n\nSilakan perbaiki kesalahan berikut dan kirim ulang sebagai pesan baru:\n\n- ${parsed.criticalErrors.join('\n- ')}`;
       
       await sock.sendMessage(jid, { text: errorMsg });
-      return; // 🛑 HENTIKAN PROSES! Data tidak akan dikirim ke Sheet
+      return; // Berhenti! Data tidak dikirim ke Sheet
     }
 
     const reportId = buildReportId(jid, parsed.outlet, parsed.tanggalText);
-
     console.log(`\n[DEBUG] Memproses laporan - reportId: ${reportId}`);
     
     const response = await sendToSheet({
@@ -70,11 +69,20 @@ async function handleReportText({ sock, jid, text }) {
     });
 
     const wasUpdate = response?.data?.wasUpdate;
+    
+    // =========================================================
+    // PENAMPIL WARNING KEMBALI DIMASUKKAN
+    // =========================================================
+    const warningText = (parsed.warnings && parsed.warnings.length > 0) 
+      ? `\n\n⚠️ *Catatan (Info Selisih):*\n- ${parsed.warnings.join('\n- ')}` 
+      : '';
+    
     const statusText = wasUpdate
       ? `🔄 Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *DIPERBARUI (REVISI)* di Google Sheet.`
       : `✅ Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *DICATAT* ke Google Sheet.`;
 
-    await sock.sendMessage(jid, { text: statusText });
+    // Menggabungkan pesan Sukses + Warning Selisih (Sebelumnya ini tertinggal)
+    await sock.sendMessage(jid, { text: `${statusText}${warningText}` });
   } catch (err) {
     console.error('Gagal memproses laporan:', err.message);
   }
@@ -126,7 +134,6 @@ async function startBot() {
 
       const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
-      // TANGKAP TYPO KATA "REPORT" (Repirt, Repot, Laporan, dll)
       if (!text || !/^(report|repirt|repot|laporan|raport)\b/i.test(text.trim())) continue;
 
       console.log(`\n📩 [PESAN MASUK] Terdeteksi dari grup ${GROUP_OUTLET_MAP[jid]}`);
