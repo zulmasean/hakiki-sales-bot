@@ -172,18 +172,34 @@ async function startBot() {
 
   // Pesan yang DI-EDIT (tekan lama pesan > Edit di WhatsApp)
   sock.ev.on('messages.update', async (updates) => {
-    for (const { key, update } of updates) {
+    for (const item of updates) {
+      const { key, update } = item;
       const jid = key?.remoteJid;
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
 
-      // Tergantung versi Baileys, konten pesan hasil edit bisa muncul langsung
-      // di update.message, atau dibungkus di update.message.editedMessage.message
-      const editedContent = update?.message?.editedMessage?.message || update?.message || null;
-      if (!editedContent) continue;
+      // DEBUG SEMENTARA - cetak struktur mentah apa adanya, supaya kita tahu
+      // persis bentuk data yang dikirim Baileys untuk event edit ini.
+      console.log('\n[DEBUG RAW messages.update]', JSON.stringify(item, null, 2));
+
+      // Coba beberapa kemungkinan lokasi konten hasil edit (tergantung versi Baileys)
+      const editedContent =
+        update?.message?.editedMessage?.message ||
+        update?.message?.protocolMessage?.editedMessage ||
+        update?.message ||
+        null;
+
+      if (!editedContent) {
+        console.log('[DEBUG] Tidak ada editedContent yang berhasil diekstrak dari update di atas.');
+        continue;
+      }
 
       const text = extractText(editedContent);
-      if (!text || !/^report\b/i.test(text.trim())) continue;
+      if (!text) {
+        console.log('[DEBUG] editedContent ditemukan tapi tidak mengandung teks (conversation/extendedTextMessage).');
+        continue;
+      }
+      if (!/^report\b/i.test(text.trim())) continue;
 
       console.log(`✏️  Terdeteksi edit pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
       await handleReportText({ sock, jid, msgKey: key, text, isEdit: true });
