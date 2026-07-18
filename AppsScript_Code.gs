@@ -64,12 +64,17 @@ function doPost(e) {
     const outlet = body.outlet || '';
     const p = body.products || {};
 
+    // Cek dulu apakah reportId ini sudah pernah ada sebelumnya - dipakai bot
+    // untuk menampilkan balasan "berhasil dicatat" vs "berhasil diperbarui".
+    const mahSheetForCheck = getOrCreateSheet(SHEET_MAH, true);
+    const wasUpdate = findRowByReportId(mahSheetForCheck, reportId) > 0;
+
     upsertProductRow(SHEET_MAH, true, now, tanggal, outlet, p.mieAyamHakiki || {}, reportId);
     upsertProductRow(SHEET_AK, false, now, tanggal, outlet, p.ayamKabupaten || {}, reportId);
     upsertProductRow(SHEET_PM, false, now, tanggal, outlet, p.pempekMakcik || {}, reportId);
     upsertPengeluaranRows(now, tanggal, outlet, body.pengeluaranItems || [], body.totalPengeluaran || 0, reportId);
 
-    return jsonResponse({ status: 'ok' });
+    return jsonResponse({ status: 'ok', wasUpdate: wasUpdate });
   } catch (err) {
     return jsonResponse({ status: 'error', message: err.message });
   } finally {
