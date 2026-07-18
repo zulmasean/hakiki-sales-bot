@@ -1,11 +1,18 @@
 /**
  * APPS SCRIPT WEB APP
  * Menerima data laporan penjualan (JSON) dari bot WhatsApp dan mencatatnya
- * otomatis ke 4 Google Sheet terpisah:
+ * ke 4 Google Sheet terpisah:
  *   1. Laporan Mie Ayam Hakiki
  *   2. Laporan Ayam Kabupaten
  *   3. Laporan Pempek Makcik
  *   4. Laporan Pengeluaran Outlet
+ *
+ * FITUR EDIT PESAN:
+ * Setiap laporan dikirim dengan "reportId" unik (dibentuk dari ID grup + ID
+ * pesan WhatsApp aslinya). Kalau reportId yang sama dikirim lagi (karena
+ * admin mengedit pesan di WA), sistem akan MENIMPA baris yang sudah ada,
+ * bukan membuat baris baru. Kolom "Report ID" di ujung kanan tiap sheet
+ * dipakai untuk pencocokan ini — jangan diedit/dihapus manual.
  *
  * CARA PASANG:
  * 1. Buka/buat Google Sheet tujuan -> menu Extensions > Apps Script.
@@ -19,9 +26,6 @@
  *    di file .env bot.
  * 6. Setiap kali kode ini diubah, buat deployment baru
  *    (Manage deployments > Edit > New version).
- *
- * Keempat sheet di atas akan otomatis terbentuk sendiri saat data pertama masuk,
- * tidak perlu dibuat manual.
  */
 
 const SHARED_SECRET = 'Ay@mb4k4r';
@@ -39,22 +43,20 @@ function doPost(e) {
       return jsonResponse({ status: 'error', message: 'Unauthorized' });
     }
 
+    const reportId = body.reportId || '';
+    if (!reportId) {
+      return jsonResponse({ status: 'error', message: 'reportId wajib diisi' });
+    }
+
     const now = new Date();
     const tanggal = body.tanggalText || '';
     const outlet = body.outlet || '';
     const p = body.products || {};
 
-    // 1) Sheet Mie Ayam Hakiki (punya kolom Grab Ref & Gofood Ref)
-    writeProductRow(SHEET_MAH, true, now, tanggal, outlet, p.mieAyamHakiki || {});
-
-    // 2) Sheet Ayam Kabupaten (tanpa kolom Ref)
-    writeProductRow(SHEET_AK, false, now, tanggal, outlet, p.ayamKabupaten || {});
-
-    // 3) Sheet Pempek Makcik (tanpa kolom Ref)
-    writeProductRow(SHEET_PM, false, now, tanggal, outlet, p.pempekMakcik || {});
-
-    // 4) Sheet Pengeluaran Outlet (satu baris per item + satu baris ringkasan total)
-    writePengeluaranRows(now, tanggal, outlet, body.pengeluaranItems || [], body.totalPengeluaran || 0);
+    upsertProductRow(SHEET_MAH, true, now, tanggal, outlet, p.mieAyamHakiki || {}, reportId);
+    upsertProductRow(SHEET_AK, false, now, tanggal, outlet, p.ayamKabupaten || {}, reportId);
+    upsertProductRow(SHEET_PM, false, now, tanggal, outlet, p.pempekMakcik || {}, reportId);
+    upsertPengeluaranRows(now, tanggal, outlet, body.pengeluaranItems || [], body.totalPengeluaran || 0, reportId);
 
     return jsonResponse({ status: 'ok' });
   } catch (err) {
@@ -62,49 +64,101 @@ function doPost(e) {
   }
 }
 
-function writeProductRow(sheetName, withRefColumns, waktu, tanggal, outlet, product) {
+/**
+ * Menulis (atau menimpa, kalau reportId sudah ada) satu baris data produk.
+ */
+function upsertProductRow(sheetName, withRefColumns, waktu, tanggal, outlet, product, reportId) {
   const sheet = getOrCreateSheet(sheetName, withRefColumns);
+
   const calcTotal = withRefColumns
     ? (product.grabfood || 0) + (product.grabRef || 0) + (product.gofood || 0) +
       (product.gofoodRef || 0) + (product.shopeefood || 0) + (product.qris || 0) + (product.cash || 0)
     : (product.grabfood || 0) + (product.gofood || 0) + (product.shopeefood || 0) +
       (product.qris || 0) + (product.cash || 0);
 
-  const row = withRefColumns
+  // Data selain kolom "Waktu Masuk" (kolom itu hanya diisi sekali saat baris dibuat)
+  const dataAfterWaktuMasuk = withRefColumns
     ? [
-        waktu, tanggal, outlet,
+        new Date(), tanggal, outlet,
         product.totalPendapatan || 0,
         product.grabfood || 0, product.grabRef || 0,
         product.gofood || 0, product.gofoodRef || 0,
         product.shopeefood || 0, product.qris || 0, product.cash || 0,
         calcTotal,
+        reportId,
       ]
     : [
-        waktu, tanggal, outlet,
+        new Date(), tanggal, outlet,
         product.totalPendapatan || 0,
         product.grabfood || 0, product.gofood || 0,
         product.shopeefood || 0, product.qris || 0, product.cash || 0,
         calcTotal,
+        reportId,
       ];
 
-  sheet.appendRow(row);
+  const existingRow = findRowByReportId(sheet, reportId);
+  if (existingRow > 0) {
+    // Timpa baris lama (kolom 2 dan seterusnya), kolom 1 "Waktu Masuk" tetap dipertahankan
+    sheet.getRange(existingRow, 2, 1, dataAfterWaktuMasuk.length).setValues([dataAfterWaktuMasuk]);
+  } else {
+    sheet.appendRow([waktu, ...dataAfterWaktuMasuk]);
+  }
 }
 
-function writePengeluaranRows(waktu, tanggal, outlet, items, totalReported) {
+/**
+ * Sheet Pengeluaran Outlet punya banyak baris per laporan (1 baris per item).
+ * Untuk edit, cara paling aman adalah hapus semua baris lama dengan reportId
+ * yang sama, lalu tulis ulang set barisnya dari awal.
+ */
+function upsertPengeluaranRows(waktu, tanggal, outlet, items, totalReported, reportId) {
   const sheet = getOrCreateSheet(SHEET_PENGELUARAN, false, true);
+
+  deleteRowsByReportId(sheet, reportId);
 
   let itemsSum = 0;
   items.forEach((item) => {
     itemsSum += item.amount || 0;
-    sheet.appendRow([waktu, tanggal, outlet, item.description || '', item.amount || 0]);
+    sheet.appendRow([waktu, tanggal, outlet, item.description || '', item.amount || 0, reportId]);
   });
 
-  // Baris ringkasan total, memudahkan cross-check dengan angka yang ditulis admin
-  sheet.appendRow([waktu, tanggal, outlet, 'TOTAL (tertulis di pesan)', totalReported]);
+  sheet.appendRow([waktu, tanggal, outlet, 'TOTAL (tertulis di pesan)', totalReported, reportId]);
 
   if (Math.abs(itemsSum - totalReported) > 1) {
-    sheet.appendRow([waktu, tanggal, outlet, '⚠️ Selisih dengan jumlah item', itemsSum - totalReported]);
+    sheet.appendRow([waktu, tanggal, outlet, '⚠️ Selisih dengan jumlah item', itemsSum - totalReported, reportId]);
   }
+}
+
+function deleteRowsByReportId(sheet, reportId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const col = getColumnIndex(sheet, 'Report ID');
+  if (!col) return;
+
+  const values = sheet.getRange(2, col, lastRow - 1, 1).getValues();
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (values[i][0] === reportId) {
+      sheet.deleteRow(i + 2);
+    }
+  }
+}
+
+function findRowByReportId(sheet, reportId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  const col = getColumnIndex(sheet, 'Report ID');
+  if (!col) return -1;
+
+  const finder = sheet.getRange(2, col, lastRow - 1, 1)
+    .createTextFinder(reportId)
+    .matchEntireCell(true);
+  const found = finder.findNext();
+  return found ? found.getRow() : -1;
+}
+
+function getColumnIndex(sheet, headerName) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idx = headers.indexOf(headerName);
+  return idx === -1 ? -1 : idx + 1;
 }
 
 function getOrCreateSheet(sheetName, withRefColumns, isPengeluaran) {
@@ -115,22 +169,24 @@ function getOrCreateSheet(sheetName, withRefColumns, isPengeluaran) {
   sheet = ss.insertSheet(sheetName);
 
   if (isPengeluaran) {
-    sheet.appendRow(['Waktu Masuk', 'Tanggal', 'Outlet', 'Deskripsi', 'Jumlah']);
+    sheet.appendRow(['Waktu Masuk', 'Tanggal', 'Outlet', 'Deskripsi', 'Jumlah', 'Report ID']);
   } else if (withRefColumns) {
     sheet.appendRow([
-      'Waktu Masuk', 'Tanggal', 'Outlet',
+      'Waktu Masuk', 'Terakhir Diupdate', 'Tanggal', 'Outlet',
       'Total Pendapatan (tertulis)',
       'Grabfood', 'Grab Ref',
       'Gofood', 'Gofood Ref',
       'Shopeefood', 'Qris', 'Cash',
       'Total Pendapatan (hitung ulang)',
+      'Report ID',
     ]);
   } else {
     sheet.appendRow([
-      'Waktu Masuk', 'Tanggal', 'Outlet',
+      'Waktu Masuk', 'Terakhir Diupdate', 'Tanggal', 'Outlet',
       'Total Pendapatan (tertulis)',
       'Grabfood', 'Gofood', 'Shopeefood', 'Qris', 'Cash',
       'Total Pendapatan (hitung ulang)',
+      'Report ID',
     ]);
   }
 
