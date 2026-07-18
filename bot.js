@@ -53,6 +53,13 @@ async function handleReportText({ sock, jid, msgKey, text, isEdit }) {
   try {
     const parsed = parseReport(text, outlet);
 
+    // Log debug sementara - bantu lacak kalau ada laporan yang datanya tidak
+    // sesuai setelah diedit. Bisa dihapus lagi nanti kalau sudah tidak perlu.
+    console.log(`\n[DEBUG] ${isEdit ? 'EDIT' : 'BARU'} - reportId: ${reportId}`);
+    console.log(`[DEBUG] totalPengeluaran hasil parsing: ${parsed.totalPengeluaran}`);
+    console.log(`[DEBUG] jumlah item pengeluaran: ${parsed.pengeluaranItems.length}`);
+    console.log(`[DEBUG] teks mentah:\n${text}\n`);
+
     await sendToSheet({
       reportId,
       outlet: parsed.outlet,
