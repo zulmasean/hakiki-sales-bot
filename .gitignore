@@ -1,0 +1,6 @@
+.env
+auth_session/
+node_modules/
+*.log
+.idea
+.DS_STORE

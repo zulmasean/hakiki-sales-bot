@@ -1,0 +1,17 @@
+{
+  "name": "wa-sales-report-bot",
+  "version": "1.0.0",
+  "description": "Bot pencatat laporan penjualan dari 4 grup WhatsApp ke Google Sheet",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test-parser": "node test-parser.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "pino": "^9.2.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
