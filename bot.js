@@ -33,31 +33,26 @@ async function sendToSheet(payload) {
 }
 
 /**
- * Fungsi Extract Text yang diperkuat.
- * Mencari isi teks sampai ke dalam struktur terdalam Baileys saat pesan diedit.
+ * Fungsi Extract Text Super Agresif
+ * Menggali teks dari semua variasi struktur JSON Baileys saat edit terjadi
  */
-function extractText(messageContent) {
-  if (!messageContent) return '';
+function extractText(msg) {
+  if (!msg) return '';
 
-  // 1. Pesan normal
-  let text = messageContent.conversation || messageContent.extendedTextMessage?.text || '';
-  if (text) return text;
-
-  // 2. Pesan Edit (Baileys mengirimkannya lewat messages.upsert sebagai protocolMessage)
-  const editMsg = messageContent.protocolMessage?.editedMessage;
-  if (editMsg) {
-    text = editMsg.conversation || editMsg.extendedTextMessage?.text || '';
-    if (text) return text;
+  // 1. Jalur edit di messages.update terbaru
+  const updateEdit = msg.editedMessage?.message?.protocolMessage?.editedMessage;
+  if (updateEdit) {
+    return updateEdit.conversation || updateEdit.extendedTextMessage?.text || '';
   }
 
-  // 3. Pesan Edit (dari event messages.update)
-  const updateMsg = messageContent.editedMessage?.message;
-  if (updateMsg) {
-    text = updateMsg.conversation || updateMsg.extendedTextMessage?.text || '';
-    if (text) return text;
+  // 2. Jalur edit di messages.upsert
+  const protocolEdit = msg.protocolMessage?.editedMessage;
+  if (protocolEdit) {
+    return protocolEdit.conversation || protocolEdit.extendedTextMessage?.text || '';
   }
 
-  return '';
+  // 3. Pesan normal
+  return msg.conversation || msg.extendedTextMessage?.text || '';
 }
 
 function buildReportId(jid, outlet, tanggalText) {
@@ -109,7 +104,6 @@ async function handleReportText({ sock, jid, text }) {
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_session');
   const { version } = await fetchLatestBaileysVersion();
-
   const usePairingCode = process.env.USE_PAIRING_CODE === 'true';
 
   const sock = makeWASocket({
@@ -129,10 +123,7 @@ async function startBot() {
         try {
           const code = await sock.requestPairingCode(phoneNumber);
           console.log('\n🔑 Kode pairing WhatsApp Anda:', code);
-          console.log(
-            'Buka WhatsApp di HP nomor bot -> Perangkat Tertaut -> Tautkan Perangkat ->\n' +
-            '"Tautkan dengan nomor telepon" -> masukkan kode di atas.\n'
-          );
+          console.log('Buka WA -> Perangkat Tertaut -> Tautkan dengan nomor telepon -> masukkan kode.\n');
         } catch (err) {
           console.error('Gagal meminta kode pairing:', err.message);
         }
@@ -146,18 +137,13 @@ async function startBot() {
     if (qr && !usePairingCode) {
       console.log('\n📱 Scan QR code ini pakai WA di HP nomor bot (Perangkat Tertaut > Tautkan Perangkat):\n');
       qrcode.generate(qr, { small: true });
-
       try {
         await QRCode.toFile('./qr.png', qr, { width: 400 });
-        console.log('🖼️  QR juga disimpan sebagai file qr.png (download & scan kalau tampilan terminal rusak)\n');
-      } catch (err) {
-        console.error('Gagal menyimpan qr.png:', err.message);
-      }
+      } catch (err) {}
     }
 
     if (connection === 'close') {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log('Koneksi terputus. Reconnect:', shouldReconnect);
       if (shouldReconnect) startBot();
     } else if (connection === 'open') {
@@ -165,9 +151,13 @@ async function startBot() {
     }
   });
 
-  // JALUR 1: Event `upsert` (Menangkap pesan baru DAN pesan yang diedit tipe ProtocolMessage)
+  // =======================================================
+  // PENANGANAN PESAN & EDIT (DIPERKUAT)
+  // =======================================================
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+    // KITA HAPUS: if (type !== 'notify') return;
+    // Agar event edit yang masuk saat reconnect/append tetap tertangkap
 
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
@@ -175,6 +165,11 @@ async function startBot() {
       const jid = msg.key.remoteJid;
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
+
+      // Pancingan Log Debug: Jika pesan ini berjenis Edit (tipe 14), kita print bentuk mentahnya
+      if (msg.message.protocolMessage && (msg.message.protocolMessage.type === 14 || msg.message.protocolMessage.type === 'MESSAGE_EDIT')) {
+        console.log('\n[DEBUG RAW UPSERT EDIT DETECTED]', JSON.stringify(msg.message, null, 2));
+      }
 
       const text = extractText(msg.message);
       if (!text || !/^report\b/i.test(text.trim())) continue;
@@ -189,7 +184,6 @@ async function startBot() {
     }
   });
 
-  // JALUR 2: Event `update` (Fallback jika WA client melempar edit ke jalur ini)
   sock.ev.on('messages.update', async (updates) => {
     for (const item of updates) {
       const { key, update } = item;
@@ -197,6 +191,11 @@ async function startBot() {
       
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
+
+      // Pancingan Log Debug: Jika ada unsur "editedMessage" di dalam update
+      if (JSON.stringify(update).includes('editedMessage')) {
+        console.log('\n[DEBUG RAW UPDATE EDIT DETECTED]', JSON.stringify(update, null, 2));
+      }
 
       if (update && update.message) {
         const text = extractText(update.message);
