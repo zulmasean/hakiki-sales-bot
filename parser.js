@@ -1,15 +1,15 @@
 // parser.js
-// Mengubah teks laporan WhatsApp menjadi data terstruktur dengan validasi ketat
+// Mengubah teks laporan WhatsApp menjadi data terstruktur dengan VALIDASI KETAT
 
 function toNumber(raw, labelForError) {
   if (raw === undefined || raw === null) return 0;
   let s = String(raw).trim();
   if (s === '' || s === '-') return 0;
   
-  // Bersihkan "Rp", "Rp.", "rp " di awal agar tidak dianggap huruf
+  // Bersihkan "Rp" di awal agar tidak dianggap huruf
   s = s.replace(/^rp\.?\s*/i, '').trim();
 
-  // Deteksi format singkatan "rb" atau "k" (contoh: 150rb atau 150k)
+  // Format ribuan singkatan: "150rb" atau "150k"
   const kMatch = s.match(/^([\d.,]+)\s*(rb|k)$/i);
   if (kMatch) {
     const numStr = kMatch[1].replace(/\./g, '').replace(',', '.');
@@ -18,14 +18,13 @@ function toNumber(raw, labelForError) {
     return Math.round(num * 1000);
   }
 
-  // Format angka normal: titik = pemisah ribuan, koma = desimal
   s = s.replace(/\./g, '').replace(/,/g, '.');
   
-  // Gunakan Number() yang sangat ketat (jika ada 1 huruf saja, hasilnya akan NaN)
+  // Number() sangat ketat. Jika ada 1 huruf saja (misal: "30000 ayam"), hasilnya NaN (Not a Number)
   const n = Number(s); 
   
   if (isNaN(n)) {
-    throw new Error(`Kolom "${labelForError}" salah! (Anda mengisi: "${raw}"). Harus berupa angka.`);
+    throw new Error(`Kolom "${labelForError}" salah isi: "${raw}". Harus berupa ANGKA SAJA.`);
   }
   return Math.round(n);
 }
@@ -48,53 +47,31 @@ const FIELD_MAP = {
 };
 
 function emptyProduct() {
-  return {
-    totalPendapatan: 0,
-    grabfood: 0,
-    grabRef: 0,
-    gofood: 0,
-    gofoodRef: 0,
-    shopeefood: 0,
-    qris: 0,
-    cash: 0,
-  };
+  return { totalPendapatan: 0, grabfood: 0, grabRef: 0, gofood: 0, gofoodRef: 0, shopeefood: 0, qris: 0, cash: 0 };
 }
 
 function normalizeLabel(label) {
-  return label
-    .toLowerCase()
-    .replace(/[^a-z ]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return label.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function parseExpenseLine(line, criticalErrors) {
   const cleaned = line.replace(/^[-•*]+\s*/, '').trim();
   
-  // Cek format ideal: 4.000(sunghlt)
-  const match = cleaned.match(/^([\d.,]+)\s*\(([^)]*)\)\s*$/);
-  if (match) {
+  // FORMAT KETAT: Angka(Deskripsi) => Contoh: 4000(sunghlt) atau 4.000(ikan asin)
+  const strictMatch = cleaned.match(/^([\d.,]+)\s*\(([^)]+)\)\s*$/);
+  
+  if (strictMatch) {
     try {
-      return { amount: toNumber(match[1], `Harga Pengeluaran ${match[2].trim()}`), description: match[2].trim() };
+      return { amount: toNumber(strictMatch[1], `Pengeluaran ${strictMatch[2].trim()}`), description: strictMatch[2].trim() };
     } catch (e) {
-      criticalErrors.push(`Input nominal pengeluaran tidak valid pada baris: "${line}"`);
-      return { amount: 0, description: match[2].trim() };
+      criticalErrors.push(`Nominal pengeluaran tidak valid: "${line}"`);
+      return { amount: 0, description: strictMatch[2].trim() };
     }
   }
   
-  // Fallback: ambil angka pertama yang ditemukan
-  const numMatch = cleaned.match(/([\d.,]+)/);
-  if (!numMatch) {
-    criticalErrors.push(`Pengeluaran tidak mencantumkan harga/angka yang jelas pada baris: "${line}"`);
-    return { amount: 0, description: cleaned };
-  }
-  
-  try {
-    return { amount: toNumber(numMatch[1], `Harga Pengeluaran`), description: cleaned };
-  } catch (e) {
-    criticalErrors.push(`Input nominal pengeluaran tidak valid pada baris: "${line}"`);
-    return { amount: 0, description: cleaned };
-  }
+  // Jika formatnya seperti "(sunghlt)4000" atau salah ketik lainnya:
+  criticalErrors.push(`Format pengeluaran salah: "${line}". Gunakan format persis: Angka(Deskripsi) contoh: 4000(sunghlt)`);
+  return { amount: 0, description: cleaned };
 }
 
 function parseReport(rawText, outletFromGroup) {
@@ -113,20 +90,19 @@ function parseReport(rawText, outletFromGroup) {
     totalPengeluaran: 0,
     raw: rawText,
     warnings: [],
-    criticalErrors: [], // ARRAY BARU UNTUK MENAMPUNG ERROR FATAL (BUKAN ANGKA)
+    criticalErrors: [], // Penampung semua dosa Typo
   };
 
   let currentSection = null;
   let inPengeluaranBlock = false;
 
   for (const line of lines) {
-    if (/^report\b/i.test(line)) {
-      const rest = line.replace(/^report\s*/i, '');
+    // 1. Tangkap Judul Laporan (Toleransi Typo kata Report)
+    if (/^(report|repirt|repot|laporan|raport)\b/i.test(line)) {
+      const rest = line.replace(/^(report|repirt|repot|laporan|raport)\s*/i, '');
       if (outletFromGroup) {
         const idx = rest.toLowerCase().indexOf(outletFromGroup.toLowerCase());
-        result.tanggalText = idx >= 0
-          ? rest.slice(idx + outletFromGroup.length).trim()
-          : rest.trim();
+        result.tanggalText = idx >= 0 ? rest.slice(idx + outletFromGroup.length).trim() : rest.trim();
         if (!result.outlet) result.outlet = outletFromGroup;
       } else {
         result.tanggalText = rest.trim();
@@ -134,6 +110,7 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
+    // 2. Tangkap Judul Produk
     const normalizedForHeader = normalizeLabel(line);
     if (SECTION_HEADERS[normalizedForHeader]) {
       currentSection = SECTION_HEADERS[normalizedForHeader];
@@ -141,7 +118,8 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
-    if (/^pengeluaran(\s+outlet)?\b/i.test(line)) {
+    // 3. Tangkap Judul Pengeluaran
+    if (/^(pengeluaran|keluaran)\s*(outlet)?\s*:?/i.test(line)) {
       currentSection = null;
       inPengeluaranBlock = true;
       const parts = line.split(':');
@@ -152,7 +130,7 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
-    // Tangkap baris "Total :" di Pengeluaran
+    // 4. Tangkap Total Pengeluaran
     if (/^total\s*:/i.test(line)) {
       const labelPart = line.split(':')[0].trim();
       const val = line.split(':').slice(1).join(':').trim();
@@ -170,7 +148,7 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
-    // Proses baris produk (Grabfood, Gofood, dll)
+    // 5. Tangkap Kolom Isian Data
     if (currentSection && line.includes(':')) {
       const [labelPart, ...valueParts] = line.split(':');
       const label = normalizeLabel(labelPart);
@@ -181,41 +159,20 @@ function parseReport(rawText, outletFromGroup) {
         try {
           result.products[currentSection][field] = toNumber(value, labelPart.trim());
         } catch (e) {
-          result.criticalErrors.push(e.message); // Masukkan ke daftar dosa (error)
+          result.criticalErrors.push(e.message);
         }
       } else {
-        result.warnings.push(`Baris tidak dikenali di area ${currentSection}: "${line}"`);
+        // ERROR JIKA LABEL SALAH (misal: tutal pendapatan)
+        result.criticalErrors.push(`Nama kolom salah ketik / tidak dikenali: "${line}"`);
       }
       continue;
     }
 
-    result.warnings.push(`Baris tidak dikenali: "${line}"`);
+    // 6. CATCH-ALL: ERROR JIKA JUDUL SALAH (misal: Mie Bebek Hakiki)
+    result.criticalErrors.push(`Baris salah ketik / format tidak dikenali: "${line}"`);
   }
 
-  // Proses daftar pengeluaran
   result.pengeluaranItems = result.pengeluaranDetailLines.map(line => parseExpenseLine(line, result.criticalErrors));
-  result.pengeluaranDetailText = result.pengeluaranDetailLines.join(' | ');
-
-  // Hitung ulang silang untuk dimunculkan sebagai warning biasa (bukan penolakan)
-  const calcSum = (p) =>
-    p.grabfood + p.grabRef + p.gofood + p.gofoodRef + p.shopeefood + p.qris + p.cash;
-
-  for (const key of Object.keys(result.products)) {
-    const p = result.products[key];
-    const calculated = calcSum(p);
-    if (p.totalPendapatan && Math.abs(calculated - p.totalPendapatan) > 1) {
-      result.warnings.push(
-        `${key}: total pendapatan tertulis (${p.totalPendapatan}) ≠ hitung ulang (${calculated})`
-      );
-    }
-  }
-
-  const itemsSum = result.pengeluaranItems.reduce((sum, item) => sum + item.amount, 0);
-  if (result.totalPengeluaran && Math.abs(itemsSum - result.totalPengeluaran) > 1) {
-    result.warnings.push(
-      `Total pengeluaran tertulis (${result.totalPengeluaran}) ≠ jumlah item di list (${itemsSum})`
-    );
-  }
 
   return result;
 }
