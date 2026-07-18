@@ -130,10 +130,20 @@ async function startBot() {
       if (!msg.message || msg.key.fromMe) continue;
       
       const jid = msg.key.remoteJid;
-      if (!jid || !GROUP_OUTLET_MAP[jid]) continue;
+      
+      // 1. Pastikan pesan berasal dari Grup (diakhiri dengan @g.us)
+      if (!jid || !jid.endsWith('@g.us')) continue;
+
+      // 2. DETEKSI ID GRUP BARU
+      if (!GROUP_OUTLET_MAP[jid]) {
+        // Cetak ID Grup ke layar CLI agar mudah disalin
+        console.log(`ℹ️ Pesan dari grup belum terdaftar: ${jid}`);
+        continue; // Hentikan proses, karena grup belum ada di daftar
+      }
 
       const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
+      // TANGKAP TYPO KATA "REPORT"
       if (!text || !/^(report|repirt|repot|laporan|raport)\b/i.test(text.trim())) continue;
 
       console.log(`\n📩 [PESAN MASUK] Terdeteksi dari grup ${GROUP_OUTLET_MAP[jid]}`);
