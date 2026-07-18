@@ -38,7 +38,18 @@ async function sendToSheet(payload) {
 
 function extractText(messageContent) {
   if (!messageContent) return '';
-  return messageContent.conversation || messageContent.extendedTextMessage?.text || '';
+
+  // 1. Ambil teks dari pesan normal
+  if (messageContent.conversation) return messageContent.conversation;
+  if (messageContent.extendedTextMessage?.text) return messageContent.extendedTextMessage.text;
+
+  // 2. Ambil teks dari pesan yang di-edit (Baileys membungkusnya di protocolMessage)
+  const editedMessage = messageContent.protocolMessage?.editedMessage;
+  if (editedMessage) {
+    return editedMessage.conversation || editedMessage.extendedTextMessage?.text || '';
+  }
+
+  return '';
 }
 
 /**
@@ -185,28 +196,26 @@ async function startBot() {
     for (const item of updates) {
       const { key, update } = item;
       const jid = key?.remoteJid;
+      
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
 
-      // DEBUG - biarkan tetap ada, tidak mengganggu, membantu kalau perlu
-      // ditelusuri lagi nanti.
-      console.log('\n[DEBUG RAW messages.update]', JSON.stringify(item, null, 2));
+      // Pastikan ada payload update pesannya
+      if (!update || !update.message) continue;
 
-      const editedContent =
-        update?.message?.editedMessage?.message ||
-        update?.message?.protocolMessage?.editedMessage ||
-        update?.message ||
-        null;
+      // Ekstrak teks menggunakan fungsi baru (mengambil isi pesan yang sudah diedit)
+      let text = extractText(update.message);
+      
+      // Fallback: Jika struktur Baileys menggunakan bentuk lain
+      if (!text && update.message.editedMessage?.message) {
+        text = extractText(update.message.editedMessage.message);
+      }
 
-      if (!editedContent) continue;
-
-      const text = extractText(editedContent);
       if (!text || !/^report\b/i.test(text.trim())) continue;
 
-      console.log(`✏️  Terdeteksi edit pesan (lewat messages.update) di grup ${GROUP_OUTLET_MAP[jid]}`);
+      console.log(`✏️ Terdeteksi edit pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
       await handleReportText({ sock, jid, text });
     }
   });
-}
 
 startBot();
