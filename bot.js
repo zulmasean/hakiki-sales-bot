@@ -8,6 +8,7 @@ const {
 const P = require('pino');
 const axios = require('axios');
 const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const { parseReport } = require('./parser');
 
 // ============================================================
@@ -35,9 +36,55 @@ async function sendToSheet(payload) {
   );
 }
 
+function extractText(messageContent) {
+  if (!messageContent) return '';
+  return messageContent.conversation || messageContent.extendedTextMessage?.text || '';
+}
+
+/**
+ * Diproses baik untuk pesan baru maupun pesan hasil edit.
+ * `reportId` (dibentuk dari jid + ID pesan WA asli) dipakai Apps Script
+ * untuk menentukan apakah harus menambah baris baru atau menimpa baris lama.
+ */
+async function handleReportText({ sock, jid, msgKey, text, isEdit }) {
+  const outlet = GROUP_OUTLET_MAP[jid];
+  const reportId = `${jid}::${msgKey.id}`;
+
+  try {
+    const parsed = parseReport(text, outlet);
+
+    await sendToSheet({
+      reportId,
+      outlet: parsed.outlet,
+      tanggalText: parsed.tanggalText,
+      products: parsed.products,
+      pengeluaranItems: parsed.pengeluaranItems,
+      totalPengeluaran: parsed.totalPengeluaran,
+      raw: parsed.raw,
+    });
+
+    const warningText = parsed.warnings.length
+      ? `\n\n⚠️ Catatan:\n- ${parsed.warnings.join('\n- ')}`
+      : '';
+
+    const statusText = isEdit
+      ? `🔄 Laporan *${outlet}* berhasil *diperbarui* di Google Sheet (mengikuti pesan yang diedit).`
+      : `✅ Laporan *${outlet}* berhasil dicatat ke Google Sheet.`;
+
+    await sock.sendMessage(jid, { text: `${statusText}${warningText}` });
+  } catch (err) {
+    console.error('Gagal memproses laporan:', err.message);
+    await sock.sendMessage(jid, {
+      text: `❌ Gagal ${isEdit ? 'memperbarui' : 'mencatat'} laporan *${outlet}*. Cek format pesan lalu kirim ulang.\n(${err.message})`,
+    });
+  }
+}
+
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_session');
   const { version } = await fetchLatestBaileysVersion();
+
+  const usePairingCode = process.env.USE_PAIRING_CODE === 'true';
 
   const sock = makeWASocket({
     version,
@@ -47,12 +94,45 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', (update) => {
+  // Metode pairing code: cocok untuk VPS, tidak butuh QR sama sekali.
+  // Aktifkan dengan USE_PAIRING_CODE=true + PAIRING_PHONE_NUMBER di .env
+  if (usePairingCode && !sock.authState.creds.registered) {
+    const phoneNumber = (process.env.PAIRING_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
+    if (!phoneNumber) {
+      console.error('❌ USE_PAIRING_CODE=true tapi PAIRING_PHONE_NUMBER kosong/salah format di .env');
+    } else {
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(phoneNumber);
+          console.log('\n🔑 Kode pairing WhatsApp Anda:', code);
+          console.log(
+            'Buka WhatsApp di HP nomor bot -> Perangkat Tertaut -> Tautkan Perangkat ->\n' +
+            '"Tautkan dengan nomor telepon" -> masukkan kode di atas.\n'
+          );
+        } catch (err) {
+          console.error('Gagal meminta kode pairing:', err.message);
+        }
+      }, 3000);
+    }
+  }
+
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && !usePairingCode) {
       console.log('\n📱 Scan QR code ini pakai WA di HP nomor bot (Perangkat Tertaut > Tautkan Perangkat):\n');
       qrcode.generate(qr, { small: true });
+
+      // Cadangan: simpan juga sebagai file gambar. Kalau QR di terminal
+      // tidak terbaca (sering terjadi di VPS via SSH), download file ini
+      // ke komputer/HP lalu scan dari situ, mis:
+      //   scp user@vps-ip:~/wa-sales-bot/qr.png .
+      try {
+        await QRCode.toFile('./qr.png', qr, { width: 400 });
+        console.log('🖼️  QR juga disimpan sebagai file qr.png (download & scan kalau tampilan terminal rusak)\n');
+      } catch (err) {
+        console.error('Gagal menyimpan qr.png:', err.message);
+      }
     }
 
     if (connection === 'close') {
@@ -65,6 +145,7 @@ async function startBot() {
     }
   });
 
+  // Pesan BARU
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -79,40 +160,30 @@ async function startBot() {
         continue;
       }
 
-      const text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        '';
-
+      const text = extractText(msg.message);
       if (!/^report\b/i.test(text.trim())) continue; // abaikan chat biasa
 
-      const outlet = GROUP_OUTLET_MAP[jid];
+      await handleReportText({ sock, jid, msgKey: msg.key, text, isEdit: false });
+    }
+  });
 
-      try {
-        const parsed = parseReport(text, outlet);
+  // Pesan yang DI-EDIT (tekan lama pesan > Edit di WhatsApp)
+  sock.ev.on('messages.update', async (updates) => {
+    for (const { key, update } of updates) {
+      const jid = key?.remoteJid;
+      if (!jid || !jid.endsWith('@g.us')) continue;
+      if (!GROUP_OUTLET_MAP[jid]) continue;
 
-        await sendToSheet({
-          outlet: parsed.outlet,
-          tanggalText: parsed.tanggalText,
-          products: parsed.products,
-          pengeluaranItems: parsed.pengeluaranItems,
-          totalPengeluaran: parsed.totalPengeluaran,
-          raw: parsed.raw,
-        });
+      // Tergantung versi Baileys, konten pesan hasil edit bisa muncul langsung
+      // di update.message, atau dibungkus di update.message.editedMessage.message
+      const editedContent = update?.message?.editedMessage?.message || update?.message || null;
+      if (!editedContent) continue;
 
-        const warningText = parsed.warnings.length
-          ? `\n\n⚠️ Catatan:\n- ${parsed.warnings.join('\n- ')}`
-          : '';
+      const text = extractText(editedContent);
+      if (!text || !/^report\b/i.test(text.trim())) continue;
 
-        await sock.sendMessage(jid, {
-          text: `✅ Laporan *${outlet}* berhasil dicatat ke Google Sheet.${warningText}`,
-        });
-      } catch (err) {
-        console.error('Gagal memproses laporan:', err.message);
-        await sock.sendMessage(jid, {
-          text: `❌ Gagal mencatat laporan *${outlet}*. Cek format pesan lalu kirim ulang.\n(${err.message})`,
-        });
-      }
+      console.log(`✏️  Terdeteksi edit pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
+      await handleReportText({ sock, jid, msgKey: key, text, isEdit: true });
     }
   });
 }
