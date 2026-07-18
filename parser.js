@@ -46,6 +46,9 @@ const FIELD_MAP = {
   'cash': 'cash',
 };
 
+// DAFTAR OUTLET YANG DIKENALI (HARUS HURUF KECIL SEMUA)
+const KNOWN_OUTLETS = ['catalina', 'pondok aren', 'pamulang', 'palmerah'];
+
 function emptyProduct() {
   return { totalPendapatan: 0, grabfood: 0, grabRef: 0, gofood: 0, gofoodRef: 0, shopeefood: 0, qris: 0, cash: 0 };
 }
@@ -57,9 +60,7 @@ function normalizeLabel(label) {
 function parseExpenseLine(line, criticalErrors) {
   const cleaned = line.replace(/^[-•*]+\s*/, '').trim();
   
-  // FORMAT KETAT: Angka(Deskripsi) => Contoh: 4000(sunghlt) atau 4.000(ikan asin)
   const strictMatch = cleaned.match(/^([\d.,]+)\s*\(([^)]+)\)\s*$/);
-  
   if (strictMatch) {
     try {
       return { amount: toNumber(strictMatch[1], `Pengeluaran ${strictMatch[2].trim()}`), description: strictMatch[2].trim() };
@@ -69,7 +70,6 @@ function parseExpenseLine(line, criticalErrors) {
     }
   }
   
-  // Jika formatnya salah:
   criticalErrors.push(`Format pengeluaran salah: "${line}". Gunakan format persis: Angka(Deskripsi) contoh: 4000(sunghlt)`);
   return { amount: 0, description: cleaned };
 }
@@ -97,12 +97,39 @@ function parseReport(rawText, outletFromGroup) {
   let inPengeluaranBlock = false;
 
   for (const line of lines) {
+    // 1. TANGKAP JUDUL LAPORAN & VALIDASI SALAH GRUP
     if (/^(report|repirt|repot|laporan|raport)\b/i.test(line)) {
-      const rest = line.replace(/^(report|repirt|repot|laporan|raport)\s*/i, '');
+      const rest = line.replace(/^(report|repirt|repot|laporan|raport)\s*/i, '').trim();
+      const restLower = rest.toLowerCase();
+      
+      // Cari tahu outlet apa yang sebenarnya diketik oleh Admin
+      let writtenOutlet = null;
+      for (const o of KNOWN_OUTLETS) {
+        if (restLower.startsWith(o)) {
+          writtenOutlet = o;
+          break;
+        }
+      }
+
       if (outletFromGroup) {
-        const idx = rest.toLowerCase().indexOf(outletFromGroup.toLowerCase());
-        result.tanggalText = idx >= 0 ? rest.slice(idx + outletFromGroup.length).trim() : rest.trim();
-        if (!result.outlet) result.outlet = outletFromGroup;
+        const outletGroupLower = outletFromGroup.toLowerCase();
+        
+        if (writtenOutlet && writtenOutlet !== outletGroupLower) {
+          // Kasus: Outlet dikenali (misal Catalina), tapi BUKAN outlet grup ini (misal Palmerah)
+          result.criticalErrors.push(`SALAH GRUP! Anda mengirim laporan untuk cabang *${writtenOutlet.toUpperCase()}* di dalam grup *${outletFromGroup.toUpperCase()}*.`);
+        } else if (!writtenOutlet && !restLower.startsWith(outletGroupLower)) {
+          // Kasus: Typo parah sehingga nama outlet tidak dikenali
+          result.criticalErrors.push(`Nama outlet pada baris pertama salah ketik atau tidak sesuai dengan nama grup ini (*${outletFromGroup.toUpperCase()}*).`);
+        }
+
+        // Ekstrak tanggal dengan memotong nama outlet dari teks
+        const matchedOutletLength = writtenOutlet ? writtenOutlet.length : outletFromGroup.length;
+        if (restLower.startsWith(writtenOutlet || outletGroupLower)) {
+          result.tanggalText = rest.slice(matchedOutletLength).trim();
+        } else {
+          result.tanggalText = rest.trim();
+        }
+        result.outlet = outletFromGroup;
       } else {
         result.tanggalText = rest.trim();
       }
@@ -168,7 +195,7 @@ function parseReport(rawText, outletFromGroup) {
   result.pengeluaranItems = result.pengeluaranDetailLines.map(line => parseExpenseLine(line, result.criticalErrors));
 
   // =========================================================================
-  // BLOK WARNING: PENGECEKAN SELISIH HITUNGAN TOTAL VS ITEM (KEMBALI HADIR)
+  // BLOK WARNING: PENGECEKAN SELISIH (TIDAK MEMBLOKIR KIRIMAN KE SHEET)
   // =========================================================================
   const calcSum = (p) => p.grabfood + p.grabRef + p.gofood + p.gofoodRef + p.shopeefood + p.qris + p.cash;
   
@@ -182,7 +209,6 @@ function parseReport(rawText, outletFromGroup) {
     const p = result.products[key];
     const calculated = calcSum(p);
     
-    // Cek selisih antara Total yang ditulis vs Hasil jumlah bot
     if (p.totalPendapatan > 0 && Math.abs(calculated - p.totalPendapatan) > 1) {
       result.warnings.push(
         `Pendapatan ${DISPLAY_NAMES[key]} tertulis (${p.totalPendapatan}) ≠ Hasil hitung bot (${calculated})`
@@ -191,7 +217,6 @@ function parseReport(rawText, outletFromGroup) {
   }
 
   const itemsSum = result.pengeluaranItems.reduce((sum, item) => sum + item.amount, 0);
-  // Cek selisih antara Total Pengeluaran yang ditulis vs Rincian item
   if (result.totalPengeluaran > 0 && Math.abs(itemsSum - result.totalPengeluaran) > 1) {
     result.warnings.push(
       `Pengeluaran tertulis (${result.totalPengeluaran}) ≠ Jumlah rincian item (${itemsSum})`
