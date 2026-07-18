@@ -20,7 +20,7 @@ function toNumber(raw, labelForError) {
 
   s = s.replace(/\./g, '').replace(/,/g, '.');
   
-  // Number() sangat ketat. Jika ada 1 huruf saja (misal: "30000 ayam"), hasilnya NaN (Not a Number)
+  // Number() sangat ketat. Jika ada 1 huruf saja, hasilnya NaN
   const n = Number(s); 
   
   if (isNaN(n)) {
@@ -51,7 +51,7 @@ function emptyProduct() {
 }
 
 function normalizeLabel(label) {
-  return label.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
+  return label.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function parseExpenseLine(line, criticalErrors) {
@@ -69,7 +69,7 @@ function parseExpenseLine(line, criticalErrors) {
     }
   }
   
-  // Jika formatnya seperti "(sunghlt)4000" atau salah ketik lainnya:
+  // Jika formatnya salah:
   criticalErrors.push(`Format pengeluaran salah: "${line}". Gunakan format persis: Angka(Deskripsi) contoh: 4000(sunghlt)`);
   return { amount: 0, description: cleaned };
 }
@@ -90,14 +90,13 @@ function parseReport(rawText, outletFromGroup) {
     totalPengeluaran: 0,
     raw: rawText,
     warnings: [],
-    criticalErrors: [], // Penampung semua dosa Typo
+    criticalErrors: [],
   };
 
   let currentSection = null;
   let inPengeluaranBlock = false;
 
   for (const line of lines) {
-    // 1. Tangkap Judul Laporan (Toleransi Typo kata Report)
     if (/^(report|repirt|repot|laporan|raport)\b/i.test(line)) {
       const rest = line.replace(/^(report|repirt|repot|laporan|raport)\s*/i, '');
       if (outletFromGroup) {
@@ -110,7 +109,6 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
-    // 2. Tangkap Judul Produk
     const normalizedForHeader = normalizeLabel(line);
     if (SECTION_HEADERS[normalizedForHeader]) {
       currentSection = SECTION_HEADERS[normalizedForHeader];
@@ -118,7 +116,6 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
-    // 3. Tangkap Judul Pengeluaran
     if (/^(pengeluaran|keluaran)\s*(outlet)?\s*:?/i.test(line)) {
       currentSection = null;
       inPengeluaranBlock = true;
@@ -130,7 +127,6 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
-    // 4. Tangkap Total Pengeluaran
     if (/^total\s*:/i.test(line)) {
       const labelPart = line.split(':')[0].trim();
       const val = line.split(':').slice(1).join(':').trim();
@@ -148,7 +144,6 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
-    // 5. Tangkap Kolom Isian Data
     if (currentSection && line.includes(':')) {
       const [labelPart, ...valueParts] = line.split(':');
       const label = normalizeLabel(labelPart);
@@ -162,17 +157,46 @@ function parseReport(rawText, outletFromGroup) {
           result.criticalErrors.push(e.message);
         }
       } else {
-        // ERROR JIKA LABEL SALAH (misal: tutal pendapatan)
         result.criticalErrors.push(`Nama kolom salah ketik / tidak dikenali: "${line}"`);
       }
       continue;
     }
 
-    // 6. CATCH-ALL: ERROR JIKA JUDUL SALAH (misal: Mie Bebek Hakiki)
     result.criticalErrors.push(`Baris salah ketik / format tidak dikenali: "${line}"`);
   }
 
   result.pengeluaranItems = result.pengeluaranDetailLines.map(line => parseExpenseLine(line, result.criticalErrors));
+
+  // =========================================================================
+  // BLOK WARNING: PENGECEKAN SELISIH HITUNGAN TOTAL VS ITEM (KEMBALI HADIR)
+  // =========================================================================
+  const calcSum = (p) => p.grabfood + p.grabRef + p.gofood + p.gofoodRef + p.shopeefood + p.qris + p.cash;
+  
+  const DISPLAY_NAMES = {
+    mieAyamHakiki: 'Mie Ayam Hakiki',
+    ayamKabupaten: 'Ayam Kabupaten',
+    pempekMakcik: 'Pempek Makcik'
+  };
+
+  for (const key of Object.keys(result.products)) {
+    const p = result.products[key];
+    const calculated = calcSum(p);
+    
+    // Cek selisih antara Total yang ditulis vs Hasil jumlah bot
+    if (p.totalPendapatan > 0 && Math.abs(calculated - p.totalPendapatan) > 1) {
+      result.warnings.push(
+        `Pendapatan ${DISPLAY_NAMES[key]} tertulis (${p.totalPendapatan}) ≠ Hasil hitung bot (${calculated})`
+      );
+    }
+  }
+
+  const itemsSum = result.pengeluaranItems.reduce((sum, item) => sum + item.amount, 0);
+  // Cek selisih antara Total Pengeluaran yang ditulis vs Rincian item
+  if (result.totalPengeluaran > 0 && Math.abs(itemsSum - result.totalPengeluaran) > 1) {
+    result.warnings.push(
+      `Pengeluaran tertulis (${result.totalPengeluaran}) ≠ Jumlah rincian item (${itemsSum})`
+    );
+  }
 
   return result;
 }
