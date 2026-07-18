@@ -6,8 +6,10 @@ function toNumber(raw, labelForError) {
   let s = String(raw).trim();
   if (s === '' || s === '-') return 0;
   
+  // Bersihkan "Rp" di awal agar tidak dianggap huruf
   s = s.replace(/^rp\.?\s*/i, '').trim();
 
+  // Format ribuan singkatan: "150rb" atau "150k"
   const kMatch = s.match(/^([\d.,]+)\s*(rb|k)$/i);
   if (kMatch) {
     const numStr = kMatch[1].replace(/\./g, '').replace(',', '.');
@@ -17,7 +19,10 @@ function toNumber(raw, labelForError) {
   }
 
   s = s.replace(/\./g, '').replace(/,/g, '.');
+  
+  // Number() sangat ketat. Jika ada 1 huruf saja, hasilnya NaN
   const n = Number(s); 
+  
   if (isNaN(n)) {
     throw new Error(`Kolom "${labelForError}" salah isi: "${raw}". Harus berupa ANGKA SAJA.`);
   }
@@ -53,6 +58,8 @@ function normalizeLabel(label) {
 
 function parseExpenseLine(line, criticalErrors) {
   const cleaned = line.replace(/^[-•*]+\s*/, '').trim();
+  
+  // FORMAT KETAT: Angka(Deskripsi) => Contoh: 4000(sunghlt) atau 4.000(ikan asin)
   const strictMatch = cleaned.match(/^([\d.,]+)\s*\(([^)]+)\)\s*$/);
   
   if (strictMatch) {
@@ -64,6 +71,7 @@ function parseExpenseLine(line, criticalErrors) {
     }
   }
   
+  // Jika formatnya salah:
   criticalErrors.push(`Format pengeluaran salah: "${line}". Gunakan format persis: Angka(Deskripsi) contoh: 4000(sunghlt)`);
   return { amount: 0, description: cleaned };
 }
@@ -87,9 +95,6 @@ function parseReport(rawText, outletFromGroup) {
     criticalErrors: [],
   };
 
-  // =========================================================
-  // TRACKER KELENGKAPAN LAPORAN
-  // =========================================================
   const sectionsFound = {
     mieAyamHakiki: false,
     ayamKabupaten: false,
@@ -137,7 +142,7 @@ function parseReport(rawText, outletFromGroup) {
     const normalizedForHeader = normalizeLabel(line);
     if (SECTION_HEADERS[normalizedForHeader]) {
       currentSection = SECTION_HEADERS[normalizedForHeader];
-      sectionsFound[currentSection] = true; // Tandai bahwa judul produk ini ada!
+      sectionsFound[currentSection] = true; 
       inPengeluaranBlock = false;
       continue;
     }
@@ -145,7 +150,7 @@ function parseReport(rawText, outletFromGroup) {
     if (/^(pengeluaran|keluaran)\s*(outlet)?\s*:?/i.test(line)) {
       currentSection = null;
       inPengeluaranBlock = true;
-      sectionsFound.pengeluaran = true; // Tandai bahwa judul pengeluaran ini ada!
+      sectionsFound.pengeluaran = true; 
       const parts = line.split(':');
       if (parts.length > 1) {
         const val = parts.slice(1).join(':').trim();
@@ -154,6 +159,9 @@ function parseReport(rawText, outletFromGroup) {
       continue;
     }
 
+    // =========================================================
+    // MODIFIKASI: BERHENTI SCAN JIKA KETEMU "TOTAL :"
+    // =========================================================
     if (/^total\s*:/i.test(line)) {
       const labelPart = line.split(':')[0].trim();
       const val = line.split(':').slice(1).join(':').trim();
@@ -163,7 +171,10 @@ function parseReport(rawText, outletFromGroup) {
         result.criticalErrors.push(e.message);
       }
       inPengeluaranBlock = false;
-      continue;
+      
+      // Menghentikan loop pembacaan baris di sini!
+      // Apapun teks di bawah "Total :", seperti Note, Saldo dll akan dilewati
+      break; 
     }
 
     if (inPengeluaranBlock) {
@@ -192,9 +203,7 @@ function parseReport(rawText, outletFromGroup) {
     result.criticalErrors.push(`Baris salah ketik / format tidak dikenali: "${line}"`);
   }
 
-  // =========================================================
-  // TEMBOK VALIDASI KELENGKAPAN (Jika terpotong, langsung tolak!)
-  // =========================================================
+  // Validasi kelengkapan seksi
   if (!sectionsFound.mieAyamHakiki) result.criticalErrors.push("Bagian laporan 'Mie Ayam Hakiki' terpotong / hilang.");
   if (!sectionsFound.ayamKabupaten) result.criticalErrors.push("Bagian laporan 'Ayam Kabupaten' terpotong / hilang.");
   if (!sectionsFound.pempekMakcik) result.criticalErrors.push("Bagian laporan 'Pempek Makcik' terpotong / hilang.");
@@ -202,6 +211,7 @@ function parseReport(rawText, outletFromGroup) {
 
   result.pengeluaranItems = result.pengeluaranDetailLines.map(line => parseExpenseLine(line, result.criticalErrors));
 
+  // Pengecekan Selisih
   const calcSum = (p) => p.grabfood + p.grabRef + p.gofood + p.gofoodRef + p.shopeefood + p.qris + p.cash;
   const DISPLAY_NAMES = {
     mieAyamHakiki: 'Mie Ayam Hakiki',
