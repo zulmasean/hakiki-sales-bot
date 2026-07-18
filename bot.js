@@ -42,6 +42,20 @@ async function handleReportText({ sock, jid, text }) {
   const outlet = GROUP_OUTLET_MAP[jid];
   try {
     const parsed = parseReport(text, outlet);
+    
+    // =========================================================
+    // TEMBOK PERTAHANAN: Jika ada input BUKAN ANGKA, TOLAK!
+    // =========================================================
+    if (parsed.criticalErrors && parsed.criticalErrors.length > 0) {
+      console.log(`\n[DEBUG] Laporan dari ${outlet} DITOLAK karena input bukan angka.`);
+      
+      const errorMsg = `❌ *LAPORAN DITOLAK (Ada Kesalahan Input)* ❌\n\nTerdapat data yang seharusnya diisi ANGKA namun Anda mengisi HURUF/KATA. Silakan perbaiki baris berikut dan kirim ulang sebagai pesan baru:\n\n- ${parsed.criticalErrors.join('\n- ')}`;
+      
+      await sock.sendMessage(jid, { text: errorMsg });
+      return; // 🛑 Hentikan fungsi di sini! Data TIDAK dikirim ke Google Sheet
+    }
+    // =========================================================
+
     const reportId = buildReportId(jid, parsed.outlet, parsed.tanggalText);
 
     console.log(`\n[DEBUG] Memproses laporan - reportId: ${reportId}`);
@@ -58,9 +72,8 @@ async function handleReportText({ sock, jid, text }) {
     });
 
     const wasUpdate = response?.data?.wasUpdate;
-    const warningText = parsed.warnings.length ? `\n\n⚠️ Catatan:\n- ${parsed.warnings.join('\n- ')}` : '';
+    const warningText = parsed.warnings.length ? `\n\n⚠️ Catatan (Hanya Info Selisih):\n- ${parsed.warnings.join('\n- ')}` : '';
     
-    // Status balasan dibedakan: Apakah bot merekam baru atau melakukan UPDATE
     const statusText = wasUpdate
       ? `🔄 Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *DIPERBARUI (REVISI)* di Google Sheet.`
       : `✅ Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *DICATAT* ke Google Sheet.`;
