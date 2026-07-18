@@ -42,25 +42,35 @@ function extractText(messageContent) {
 }
 
 /**
- * Diproses baik untuk pesan baru maupun pesan hasil edit.
- * `reportId` (dibentuk dari jid + ID pesan WA asli) dipakai Apps Script
- * untuk menentukan apakah harus menambah baris baru atau menimpa baris lama.
+ * ID pencocokan laporan sekarang dibuat dari OUTLET + TANGGAL yang tertulis
+ * di pesan itu sendiri - BUKAN dari ID pesan WhatsApp.
+ *
+ * Alasannya: pesan hasil "Edit" di WhatsApp ternyata tidak selalu terkirim
+ * lewat event edit resmi (messages.update) - kadang malah lewat jalur pesan
+ * biasa (messages.upsert) dengan ID pesan yang baru/berbeda. Kalau
+ * pencocokan berdasarkan ID pesan, ini bikin tiap "edit" dianggap laporan
+ * baru yang terpisah. Dengan outlet+tanggal sebagai kunci, laporan akan
+ * tetap ketemu & ditimpa dengan benar berapa pun kali diedit/dikirim ulang,
+ * selama outlet dan tanggalnya ditulis sama persis.
  */
-async function handleReportText({ sock, jid, msgKey, text, isEdit }) {
+function buildReportId(jid, outlet, tanggalText) {
+  const normalizedOutlet = (outlet || '').toLowerCase().trim();
+  const normalizedTanggal = (tanggalText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return `${jid}::${normalizedOutlet}::${normalizedTanggal}`;
+}
+
+async function handleReportText({ sock, jid, text }) {
   const outlet = GROUP_OUTLET_MAP[jid];
-  const reportId = `${jid}::${msgKey.id}`;
 
   try {
     const parsed = parseReport(text, outlet);
+    const reportId = buildReportId(jid, parsed.outlet, parsed.tanggalText);
 
-    // Log debug sementara - bantu lacak kalau ada laporan yang datanya tidak
-    // sesuai setelah diedit. Bisa dihapus lagi nanti kalau sudah tidak perlu.
-    console.log(`\n[DEBUG] ${isEdit ? 'EDIT' : 'BARU'} - reportId: ${reportId}`);
+    console.log(`\n[DEBUG] Memproses laporan - reportId: ${reportId}`);
     console.log(`[DEBUG] totalPengeluaran hasil parsing: ${parsed.totalPengeluaran}`);
     console.log(`[DEBUG] jumlah item pengeluaran: ${parsed.pengeluaranItems.length}`);
-    console.log(`[DEBUG] teks mentah:\n${text}\n`);
 
-    await sendToSheet({
+    const response = await sendToSheet({
       reportId,
       outlet: parsed.outlet,
       tanggalText: parsed.tanggalText,
@@ -70,19 +80,21 @@ async function handleReportText({ sock, jid, msgKey, text, isEdit }) {
       raw: parsed.raw,
     });
 
+    const wasUpdate = response?.data?.wasUpdate;
+
     const warningText = parsed.warnings.length
       ? `\n\n⚠️ Catatan:\n- ${parsed.warnings.join('\n- ')}`
       : '';
 
-    const statusText = isEdit
-      ? `🔄 Laporan *${outlet}* berhasil *diperbarui* di Google Sheet (mengikuti pesan yang diedit).`
-      : `✅ Laporan *${outlet}* berhasil dicatat ke Google Sheet.`;
+    const statusText = wasUpdate
+      ? `🔄 Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil *diperbarui* di Google Sheet.`
+      : `✅ Laporan *${outlet}* (${parsed.tanggalText || '-'}) berhasil dicatat ke Google Sheet.`;
 
     await sock.sendMessage(jid, { text: `${statusText}${warningText}` });
   } catch (err) {
     console.error('Gagal memproses laporan:', err.message);
     await sock.sendMessage(jid, {
-      text: `❌ Gagal ${isEdit ? 'memperbarui' : 'mencatat'} laporan *${outlet}*. Cek format pesan lalu kirim ulang.\n(${err.message})`,
+      text: `❌ Gagal mencatat laporan *${outlet}*. Cek format pesan lalu kirim ulang.\n(${err.message})`,
     });
   }
 }
@@ -101,8 +113,6 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Metode pairing code: cocok untuk VPS, tidak butuh QR sama sekali.
-  // Aktifkan dengan USE_PAIRING_CODE=true + PAIRING_PHONE_NUMBER di .env
   if (usePairingCode && !sock.authState.creds.registered) {
     const phoneNumber = (process.env.PAIRING_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
     if (!phoneNumber) {
@@ -148,7 +158,7 @@ async function startBot() {
     }
   });
 
-  // Pesan BARU
+  // Pesan BARU (juga menangkap kasus "edit" yang ternyata lewat jalur ini)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -166,11 +176,11 @@ async function startBot() {
       const text = extractText(msg.message);
       if (!/^report\b/i.test(text.trim())) continue; // abaikan chat biasa
 
-      await handleReportText({ sock, jid, msgKey: msg.key, text, isEdit: false });
+      await handleReportText({ sock, jid, text });
     }
   });
 
-  // Pesan yang DI-EDIT (tekan lama pesan > Edit di WhatsApp)
+  // Pesan yang DI-EDIT lewat event resmi (kalau versi Baileys/WA mendukungnya)
   sock.ev.on('messages.update', async (updates) => {
     for (const item of updates) {
       const { key, update } = item;
@@ -178,31 +188,23 @@ async function startBot() {
       if (!jid || !jid.endsWith('@g.us')) continue;
       if (!GROUP_OUTLET_MAP[jid]) continue;
 
-      // DEBUG SEMENTARA - cetak struktur mentah apa adanya, supaya kita tahu
-      // persis bentuk data yang dikirim Baileys untuk event edit ini.
+      // DEBUG - biarkan tetap ada, tidak mengganggu, membantu kalau perlu
+      // ditelusuri lagi nanti.
       console.log('\n[DEBUG RAW messages.update]', JSON.stringify(item, null, 2));
 
-      // Coba beberapa kemungkinan lokasi konten hasil edit (tergantung versi Baileys)
       const editedContent =
         update?.message?.editedMessage?.message ||
         update?.message?.protocolMessage?.editedMessage ||
         update?.message ||
         null;
 
-      if (!editedContent) {
-        console.log('[DEBUG] Tidak ada editedContent yang berhasil diekstrak dari update di atas.');
-        continue;
-      }
+      if (!editedContent) continue;
 
       const text = extractText(editedContent);
-      if (!text) {
-        console.log('[DEBUG] editedContent ditemukan tapi tidak mengandung teks (conversation/extendedTextMessage).');
-        continue;
-      }
-      if (!/^report\b/i.test(text.trim())) continue;
+      if (!text || !/^report\b/i.test(text.trim())) continue;
 
-      console.log(`✏️  Terdeteksi edit pesan di grup ${GROUP_OUTLET_MAP[jid]}`);
-      await handleReportText({ sock, jid, msgKey: key, text, isEdit: true });
+      console.log(`✏️  Terdeteksi edit pesan (lewat messages.update) di grup ${GROUP_OUTLET_MAP[jid]}`);
+      await handleReportText({ sock, jid, text });
     }
   });
 }
