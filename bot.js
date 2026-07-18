@@ -4,7 +4,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-} = require('@whiskeysockets/baileys'); // makeInMemoryStore dihapus karena menyebabkan error
+} = require('@whiskeysockets/baileys');
 const P = require('pino');
 const axios = require('axios');
 const qrcode = require('qrcode-terminal');
@@ -24,41 +24,12 @@ const GROUP_OUTLET_MAP = {
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 const SHARED_SECRET = process.env.SHARED_SECRET;
 
-// ============================================================
-// 2) MEMORI BUATAN SENDIRI (Super Ringan & Anti Error)
-// ============================================================
-const messageCache = new Map();
-
 async function sendToSheet(payload) {
   return axios.post(
     APPS_SCRIPT_URL,
     { ...payload, secret: SHARED_SECRET },
     { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
   );
-}
-
-// Fungsi ekstrak teks rekursif (mencari teks terdalam dari segala struktur WA)
-function extractText(obj) {
-  if (!obj || typeof obj !== 'object') return '';
-  let text = '';
-  
-  if (obj.editedMessage) text = extractText(obj.editedMessage);
-  if (text) return text;
-  
-  if (obj.protocolMessage?.editedMessage) text = extractText(obj.protocolMessage.editedMessage);
-  if (text) return text;
-  
-  if (obj.conversation) return obj.conversation;
-  if (obj.text) return obj.text;
-  if (obj.extendedTextMessage?.text) return obj.extendedTextMessage.text;
-  
-  for (const key of Object.keys(obj)) {
-    if (typeof obj[key] === 'object') {
-      text = extractText(obj[key]);
-      if (text) return text;
-    }
-  }
-  return '';
 }
 
 function buildReportId(jid, outlet, tanggalText) {
@@ -107,10 +78,6 @@ async function startBot() {
     version,
     auth: state,
     logger: P({ level: 'silent' }),
-    // BOT MENGAMBIL PESAN ASLI DARI CACHE BUATAN KITA SAAT ADA EDITAN
-    getMessage: async (key) => {
-      return messageCache.get(key.id) || { conversation: '' };
-    }
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -139,7 +106,9 @@ async function startBot() {
     }
   });
 
-  // JALUR 1: MENANGKAP PESAN BARU & MENYIMPAN KE MEMORI KITA
+  // =======================================================
+  // PENCEGAT PAYLOAD MENTAH (Bypass semua kelemahan Baileys)
+  // =======================================================
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
@@ -147,46 +116,32 @@ async function startBot() {
       const jid = msg.key.remoteJid;
       if (!jid || !GROUP_OUTLET_MAP[jid]) continue;
 
-      // SIMPAN PESAN KE CACHE
-      if (msg.key && msg.key.id) {
-        messageCache.set(msg.key.id, msg.message);
-        // Hapus data terlama agar memori server/VPS Anda tidak penuh
-        if (messageCache.size > 500) {
-          const firstKey = messageCache.keys().next().value;
-          messageCache.delete(firstKey);
-        }
+      let text = '';
+      let isEdit = false;
+
+      // 1. CARA PALING AMPUH MENANGKAP EDIT:
+      // WhatsApp selalu menyelipkan data edit di 'protocolMessage.editedMessage'
+      const protocolMsg = msg.message.protocolMessage;
+      if (protocolMsg && protocolMsg.editedMessage) {
+        text = protocolMsg.editedMessage.conversation || protocolMsg.editedMessage.extendedTextMessage?.text || '';
+        isEdit = true;
+      } 
+      // 2. TANGKAP PESAN BARU BIASA:
+      else {
+        text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
       }
 
-      // Filter pesan edit agar ditangani oleh messages.update di bawah
-      if (msg.message.protocolMessage && (msg.message.protocolMessage.type === 14 || msg.message.protocolMessage.type === 'MESSAGE_EDIT')) {
-        continue;
-      }
+      // Abaikan jika bukan format report
+      if (!text || !/^report\b/i.test(text.trim())) continue;
 
-      const text = extractText(msg.message);
-      if (text && /^report\b/i.test(text.trim())) {
+      if (isEdit) {
+        console.log(`\n✏️ [PESAN DIEDIT] Terdeteksi langsung dari payload di grup ${GROUP_OUTLET_MAP[jid]}`);
+      } else {
         console.log(`\n📩 [PESAN BARU] Terdeteksi di grup ${GROUP_OUTLET_MAP[jid]}`);
-        await handleReportText({ sock, jid, text });
       }
-    }
-  });
 
-  // JALUR 2: MENANGKAP PESAN YANG DIEDIT 
-  sock.ev.on('messages.update', async (updates) => {
-    for (const item of updates) {
-      const { key, update } = item;
-      const jid = key?.remoteJid;
-      
-      if (!jid || !GROUP_OUTLET_MAP[jid]) continue;
-
-      if (update && update.message) {
-        // Teks editan secara otomatis akan didapatkan karena 'getMessage' di atas mengambilnya dari Cache kita
-        const text = extractText(update.message);
-        
-        if (text && /^report\b/i.test(text.trim())) {
-          console.log(`\n✏️ [PESAN DIEDIT] Terdeteksi di grup ${GROUP_OUTLET_MAP[jid]}`);
-          await handleReportText({ sock, jid, text });
-        }
-      }
+      // Kirim data yang sudah di-ekstrak ke Sheet
+      await handleReportText({ sock, jid, text });
     }
   });
 }
