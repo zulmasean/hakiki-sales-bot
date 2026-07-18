@@ -36,6 +36,17 @@ const SHEET_PM = 'Laporan Pempek Makcik';
 const SHEET_PENGELUARAN = 'Laporan Pengeluaran Outlet';
 
 function doPost(e) {
+  const lock = LockService.getScriptLock();
+  try {
+    // Tunggu sampai 30 detik kalau ada request lain untuk reportId yang sama
+    // sedang diproses. Ini mencegah race condition: kalau ada 2 event edit
+    // yang datang hampir bersamaan, keduanya diproses satu-satu (berurutan),
+    // bukan paralel — supaya hasil akhir yang tersimpan selalu yang paling baru.
+    lock.waitLock(30000);
+  } catch (err) {
+    return jsonResponse({ status: 'error', message: 'Server sibuk, coba lagi: ' + err.message });
+  }
+
   try {
     const body = JSON.parse(e.postData.contents);
 
@@ -61,6 +72,8 @@ function doPost(e) {
     return jsonResponse({ status: 'ok' });
   } catch (err) {
     return jsonResponse({ status: 'error', message: err.message });
+  } finally {
+    lock.releaseLock();
   }
 }
 
